@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from "react";
+import Login from "./components/Login";
 import {
   AreaChart,
   Area,
@@ -53,7 +54,16 @@ const efficiencyData = [
   { month: "Jun", efficiency: 85 },
 ];
 
-const components = [
+interface SystemComponent {
+  id: string;
+  label: string;
+  type: string;
+  count: number;
+  voltage: string;
+  status: string;
+}
+
+const components: SystemComponent[] = [
   {
     id: "PZT-01",
     label: "Piezoelectric Stack",
@@ -155,19 +165,32 @@ const specs = [
 // ── Animated counter hook ─────────────────────────────────────────────────────
 
 function useCounter(target: number, duration = 1800) {
-  const [value, setValue] = useState(0);
+  const [value, setValue] = useState(target);
+  const startValueRef = useRef(target);
+  const targetRef = useRef(target);
   const raf = useRef<number>(0);
+
   useEffect(() => {
-    const start = performance.now();
+    const startValue = value;
+    startValueRef.current = startValue;
+    targetRef.current = target;
+    const change = target - startValue;
+    if (change === 0) return;
+
+    const startTime = performance.now();
     const animate = (now: number) => {
-      const progress = Math.min((now - start) / duration, 1);
+      const progress = Math.min((now - startTime) / duration, 1);
       const ease = 1 - Math.pow(1 - progress, 3);
-      setValue(Math.round(target * ease));
-      if (progress < 1) raf.current = requestAnimationFrame(animate);
+      const currentVal = Math.round(startValue + change * ease);
+      setValue(currentVal);
+      if (progress < 1) {
+        raf.current = requestAnimationFrame(animate);
+      }
     };
     raf.current = requestAnimationFrame(animate);
     return () => cancelAnimationFrame(raf.current);
   }, [target, duration]);
+
   return value;
 }
 
@@ -369,11 +392,84 @@ function ChartTooltip({ active, payload, label, unit }: any) {
 // ── Main App ──────────────────────────────────────────────────────────────────
 
 export default function App() {
+  const [token, setToken] = useState<string | null>(localStorage.getItem("jwt_token"));
+  const [user, setUser] = useState<any>(JSON.parse(localStorage.getItem("user") || "null"));
   const [activeTab, setActiveTab] = useState<"power" | "energy" | "efficiency">("power");
+  const [workingStepsData, setWorkingStepsData] = useState(workingSteps);
+  const [specsData, setSpecsData] = useState(specs);
+  const [telemetry, setTelemetry] = useState<any>(null);
 
-  const totalSteps = useCounter(14820);
-  const totalWh = useCounter(763);
-  const peakWatts = useCounter(44);
+  const handleLoginSuccess = (newToken: string, newUser: { id: string; name: string; email: string }) => {
+    localStorage.setItem("jwt_token", newToken);
+    localStorage.setItem("user", JSON.stringify(newUser));
+    setToken(newToken);
+    setUser(newUser);
+  };
+
+  const handleLogout = () => {
+    localStorage.removeItem("jwt_token");
+    localStorage.removeItem("user");
+    setToken(null);
+    setUser(null);
+  };
+
+  useEffect(() => {
+    if (!token) return;
+    fetch("/api/system-data")
+      .then((res) => {
+        if (!res.ok) throw new Error("Failed to load static system data");
+        return res.json();
+      })
+      .then((data) => {
+        if (data.workingSteps) setWorkingStepsData(data.workingSteps);
+        if (data.specs) setSpecsData(data.specs);
+      })
+      .catch((err) => {
+        console.warn("Could not load static system data from API, using default mock fallback:", err);
+      });
+  }, [token]);
+
+  useEffect(() => {
+    if (!token) return;
+    const fetchTelemetry = () => {
+      fetch("/api/telemetry")
+        .then((res) => {
+          if (!res.ok) throw new Error("Telemetry API error");
+          return res.json();
+        })
+        .then((data) => {
+          setTelemetry(data);
+        })
+        .catch((err) => {
+          console.error("Error fetching telemetry:", err);
+        });
+    };
+
+    fetchTelemetry();
+    const interval = setInterval(fetchTelemetry, 2000);
+    return () => clearInterval(interval);
+  }, [token]);
+
+  const liveSteps = telemetry?.totalSteps ?? 14820;
+  const liveWh = telemetry?.totalWh ?? 763;
+  const livePeak = telemetry?.peakWatts ?? 44;
+  const liveBatterySoc = telemetry?.batterySoc ?? 74;
+  const liveActiveSensors = telemetry?.activeSensors ?? 48;
+  const liveAvgPowerPerStep = telemetry?.avgPowerPerStep ?? 8.4;
+  const liveDailyStorage = telemetry?.dailyStorage ?? 0.76;
+
+  const totalSteps = useCounter(liveSteps);
+  const totalWh = useCounter(liveWh);
+  const peakWatts = useCounter(livePeak);
+
+  const currentHourlyPower = telemetry?.hourlyPower ?? hourlyPower;
+  const currentWeeklyEnergy = telemetry?.weeklyEnergy ?? weeklyEnergy;
+  const currentEfficiencyData = telemetry?.efficiencyData ?? efficiencyData;
+  const currentComponents: SystemComponent[] = telemetry?.components ?? components;
+
+  if (!token) {
+    return <Login onLoginSuccess={handleLoginSuccess} />;
+  }
 
   return (
     <div
@@ -399,9 +495,20 @@ export default function App() {
           </div>
           <div className="flex items-center gap-3">
             <Badge label="System Online" />
+            {user && (
+              <span className="text-primary text-xs font-mono hidden md:block">
+                OP: {user.name.toUpperCase()}
+              </span>
+            )}
             <span className="text-muted-foreground text-xs font-mono hidden sm:block">
-              Node: VERANDA-01 &nbsp;|&nbsp; {new Date().toLocaleTimeString()}
+              Node: VERANDA-01
             </span>
+            <button
+              onClick={handleLogout}
+              className="px-3 py-1 bg-destructive/10 border border-destructive/30 hover:bg-destructive/20 text-destructive text-[10px] font-mono uppercase tracking-widest rounded transition-colors cursor-pointer"
+            >
+              Logout
+            </button>
           </div>
         </div>
       </header>
@@ -476,10 +583,10 @@ export default function App() {
       {/* ── Live KPI row ── */}
       <section className="border-b border-border bg-secondary/30">
         <div className="max-w-7xl mx-auto px-6 py-8 grid grid-cols-2 md:grid-cols-4 gap-4">
-          <KpiCard label="Avg. Power / Step" value="8.4" unit="W" sub="700 N avg. force, 75 kg adult" icon={Zap} />
-          <KpiCard label="Daily Storage" value="0.76" unit="kWh" sub="per average occupancy day" icon={TrendingUp} />
-          <KpiCard label="Battery SOC" value="74" unit="%" sub="12 V / 20 Ah Li-Ion pack" icon={Cpu} />
-          <KpiCard label="Active Sensors" value="48" unit="/ 48" sub="All elements nominal" icon={Radio} />
+          <KpiCard label="Avg. Power / Step" value={liveAvgPowerPerStep.toFixed(1)} unit="W" sub="700 N avg. force, 75 kg adult" icon={Zap} />
+          <KpiCard label="Daily Storage" value={liveDailyStorage.toFixed(2)} unit="kWh" sub="per average occupancy day" icon={TrendingUp} />
+          <KpiCard label="Battery SOC" value={liveBatterySoc} unit="%" sub="12 V / 20 Ah Li-Ion pack" icon={Cpu} />
+          <KpiCard label="Active Sensors" value={liveActiveSensors} unit="/ 48" sub="All elements nominal" icon={Radio} />
         </div>
       </section>
 
@@ -496,7 +603,7 @@ export default function App() {
         <div className="max-w-7xl mx-auto px-6 py-14">
           <SectionHeading label="§ 02 — Operating Principle" title="Six-Stage Energy Conversion" />
           <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-5">
-            {workingSteps.map((step) => (
+            {workingStepsData.map((step) => (
               <div
                 key={step.num}
                 className="bg-card border border-border rounded-lg p-6 flex flex-col gap-4 hover:border-primary/30 transition-colors duration-300 group"
@@ -548,7 +655,7 @@ export default function App() {
                   Instantaneous Power Output — Watts (W) by Hour of Day
                 </p>
                 <ResponsiveContainer width="100%" height={300}>
-                  <AreaChart data={hourlyPower}>
+                  <AreaChart data={currentHourlyPower}>
                     <defs>
                       <linearGradient id="powerGrad" x1="0" y1="0" x2="0" y2="1">
                         <stop offset="5%" stopColor="#a3ff47" stopOpacity={0.25} />
@@ -570,7 +677,7 @@ export default function App() {
                   Daily Energy Yield — Kilowatt-hours (kWh) This Week
                 </p>
                 <ResponsiveContainer width="100%" height={300}>
-                  <BarChart data={weeklyEnergy}>
+                  <BarChart data={currentWeeklyEnergy}>
                     <CartesianGrid strokeDasharray="3 3" stroke="rgba(163,255,71,0.07)" />
                     <XAxis dataKey="day" tick={{ fill: "#6b7a8f", fontSize: 11, fontFamily: "JetBrains Mono" }} axisLine={false} tickLine={false} />
                     <YAxis tick={{ fill: "#6b7a8f", fontSize: 11, fontFamily: "JetBrains Mono" }} axisLine={false} tickLine={false} />
@@ -586,7 +693,7 @@ export default function App() {
                   Overall System Efficiency (%) — 6-Month Trend
                 </p>
                 <ResponsiveContainer width="100%" height={300}>
-                  <LineChart data={efficiencyData}>
+                  <LineChart data={currentEfficiencyData}>
                     <CartesianGrid strokeDasharray="3 3" stroke="rgba(163,255,71,0.07)" />
                     <XAxis dataKey="month" tick={{ fill: "#6b7a8f", fontSize: 11, fontFamily: "JetBrains Mono" }} axisLine={false} tickLine={false} />
                     <YAxis domain={[65, 90]} tick={{ fill: "#6b7a8f", fontSize: 11, fontFamily: "JetBrains Mono" }} axisLine={false} tickLine={false} />
@@ -617,7 +724,7 @@ export default function App() {
                   </tr>
                 </thead>
                 <tbody>
-                  {components.map((c, i) => (
+                  {currentComponents.map((c, i) => (
                     <tr
                       key={c.id}
                       className={`border-b border-border hover:bg-secondary/30 transition-colors ${i % 2 === 0 ? "" : "bg-secondary/10"}`}
@@ -644,7 +751,7 @@ export default function App() {
         <div className="max-w-7xl mx-auto px-6 py-14">
           <SectionHeading label="§ 05 — Technical Specifications" title="System Parameters & Design Values" />
           <div className="grid md:grid-cols-2 gap-4">
-            {specs.map(([param, value]) => (
+            {specsData.map(([param, value]) => (
               <div key={param} className="bg-card border border-border rounded-lg px-5 py-4 flex items-start justify-between gap-4 hover:border-primary/20 transition-colors">
                 <span className="text-muted-foreground text-sm">{param}</span>
                 <span className="font-mono text-sm text-foreground text-right">{value}</span>
